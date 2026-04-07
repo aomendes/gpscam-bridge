@@ -13,13 +13,15 @@ from .models import Endpoint, GpsSample, ServerStatus
 class MobileServerClient:
     def __init__(self) -> None:
         timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+        connector = aiohttp.TCPConnector(limit=64, limit_per_host=16, ttl_dns_cache=60)
+        self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
     async def close(self) -> None:
         await self._session.close()
 
     async def get_status(self, endpoint: Endpoint) -> ServerStatus:
-        async with self._session.get(f"{endpoint.base_url}/api/status") as response:
+        timeout = aiohttp.ClientTimeout(total=6)
+        async with self._session.get(f"{endpoint.base_url}/api/status", timeout=timeout) as response:
             response.raise_for_status()
             payload = await response.json()
 
@@ -34,7 +36,8 @@ class MobileServerClient:
 
     async def check_health(self, endpoint: Endpoint) -> bool:
         try:
-            async with self._session.get(f"{endpoint.base_url}/api/health") as response:
+            timeout = aiohttp.ClientTimeout(total=3)
+            async with self._session.get(f"{endpoint.base_url}/api/health", timeout=timeout) as response:
                 if response.status != 200:
                     return False
                 payload = await response.json()
@@ -44,7 +47,7 @@ class MobileServerClient:
 
     async def gps_stream(self, endpoint: Endpoint) -> AsyncIterator[GpsSample]:
         ws_url = f"ws://{endpoint.host}:{endpoint.port}/api/gps"
-        async with self._session.ws_connect(ws_url, heartbeat=20) as ws:
+        async with self._session.ws_connect(ws_url, heartbeat=20, receive_timeout=90) as ws:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
@@ -95,7 +98,8 @@ class MobileServerClient:
 
     async def get_camera_frame(self, endpoint: Endpoint) -> bytes | None:
         try:
-            async with self._session.get(f"{endpoint.base_url}/api/camera/frame") as response:
+            timeout = aiohttp.ClientTimeout(total=2)
+            async with self._session.get(f"{endpoint.base_url}/api/camera/frame", timeout=timeout) as response:
                 if response.status != 200:
                     return None
                 return await response.read()

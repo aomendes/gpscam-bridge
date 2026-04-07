@@ -55,6 +55,7 @@ class DesktopBridgeApp:
         self.gps_var = tk.StringVar(value="No sample")
         self.camera_test_var = tk.StringVar(value="not run")
         self.gps_test_var = tk.StringVar(value="not run")
+        self.scan_var = tk.StringVar(value="not run")
         self.virtual_cam_var = tk.StringVar(value="disabled")
         self.log_var = tk.StringVar(value="Ready")
         self.latest_gps_timestamp_ms: Optional[int] = None
@@ -99,6 +100,7 @@ class DesktopBridgeApp:
             ("GPS", self.gps_var),
             ("Cam Test", self.camera_test_var),
             ("GPS Test", self.gps_test_var),
+            ("Scan", self.scan_var),
             ("Virtual Cam", self.virtual_cam_var),
             ("Log", self.log_var),
         ]
@@ -128,6 +130,8 @@ class DesktopBridgeApp:
         self.camera_test_btn.pack(side=tk.LEFT, padx=8, pady=8)
         self.gps_test_btn = ttk.Button(actions, text="Test GPS", command=self.run_gps_test_clicked, state=tk.DISABLED)
         self.gps_test_btn.pack(side=tk.LEFT, padx=8, pady=8)
+        self.scan_btn = ttk.Button(actions, text="Run Scan", command=self.run_scan_clicked, state=tk.DISABLED)
+        self.scan_btn.pack(side=tk.LEFT, padx=8, pady=8)
         ttk.Button(actions, text="Copy Firewall Cmd", command=self.copy_firewall_command_clicked).pack(
             side=tk.LEFT, padx=8, pady=8
         )
@@ -166,8 +170,10 @@ class DesktopBridgeApp:
         self.virtual_cam_btn.config(state=tk.DISABLED)
         self.camera_test_btn.config(state=tk.DISABLED)
         self.gps_test_btn.config(state=tk.DISABLED)
+        self.scan_btn.config(state=tk.DISABLED)
         self.camera_test_var.set("pending")
         self.gps_test_var.set("pending")
+        self.scan_var.set("pending")
         self.latest_gps_timestamp_ms = None
         self.gps_var.set("No sample")
         self.virtual_cam_var.set(self.video_receiver.virtual_status())
@@ -199,8 +205,10 @@ class DesktopBridgeApp:
         self.virtual_cam_btn.config(state=tk.DISABLED)
         self.camera_test_btn.config(state=tk.DISABLED)
         self.gps_test_btn.config(state=tk.DISABLED)
+        self.scan_btn.config(state=tk.DISABLED)
         self.camera_test_var.set("not run")
         self.gps_test_var.set("not run")
+        self.scan_var.set("not run")
         self.latest_gps_timestamp_ms = None
         self.gps_var.set("No sample")
         self._clear_preview()
@@ -259,11 +267,14 @@ class DesktopBridgeApp:
             self.virtual_cam_btn.config(state=tk.NORMAL)
             self.camera_test_btn.config(state=tk.NORMAL)
             self.gps_test_btn.config(state=tk.NORMAL)
+            self.scan_btn.config(state=tk.NORMAL)
             self.virtual_cam_var.set(self.video_receiver.virtual_status())
             self.virtual_cam_btn.config(
                 text="Disable Virtual Cam" if self.video_receiver.virtual_status().startswith(("ready", "streaming", "enabled")) else "Enable Virtual Cam"
             )
             self.log_var.set("Stream active")
+            if self.scan_var.get() in {"pending", "not run"}:
+                self.run_scan_clicked()
             return
 
         if kind == "autodetected":
@@ -318,6 +329,12 @@ class DesktopBridgeApp:
                     )
             return
 
+        if kind == "scan_result":
+            self.scan_var.set(event["message"])
+            if self.status_var.get() == "Connected":
+                self.scan_btn.config(state=tk.NORMAL)
+            return
+
         if kind == "disconnected":
             self.status_var.set("Disconnected")
             self.log_var.set(event["message"])
@@ -327,6 +344,7 @@ class DesktopBridgeApp:
             self.virtual_cam_btn.config(state=tk.DISABLED, text="Enable Virtual Cam")
             self.camera_test_btn.config(state=tk.DISABLED)
             self.gps_test_btn.config(state=tk.DISABLED)
+            self.scan_btn.config(state=tk.DISABLED)
             self._clear_preview()
             return
 
@@ -382,6 +400,23 @@ class DesktopBridgeApp:
     def run_gps_test_clicked(self) -> None:
         self._start_diag_test(kind="gps")
 
+    def run_scan_clicked(self) -> None:
+        if self.status_var.get() != "Connected":
+            messagebox.showwarning(APP_NAME, "Conecte primeiro antes de rodar varredura.")
+            return
+        endpoint = self._endpoint_from_inputs()
+        if endpoint is None:
+            messagebox.showerror(APP_NAME, "Endpoint invalido para varredura.")
+            return
+        self.scan_btn.config(state=tk.DISABLED)
+        self.scan_var.set("running...")
+        thread = threading.Thread(
+            target=self._run_scan_worker,
+            args=(endpoint, self.current_session_id, self.latest_gps_timestamp_ms),
+            daemon=True,
+        )
+        thread.start()
+
     def _endpoint_from_inputs(self) -> Endpoint | None:
         host = self.host_var.get().strip()
         if not host:
@@ -426,6 +461,14 @@ class DesktopBridgeApp:
     ) -> None:
         asyncio.run(self._diag_test_async(kind, endpoint, session_id, gps_after_timestamp_ms))
 
+    def _run_scan_worker(
+        self,
+        endpoint: Endpoint,
+        session_id: int,
+        gps_after_timestamp_ms: Optional[int],
+    ) -> None:
+        asyncio.run(self._scan_async(endpoint, session_id, gps_after_timestamp_ms))
+
     async def _diag_test_async(
         self,
         kind: str,
@@ -436,7 +479,7 @@ class DesktopBridgeApp:
         client = MobileServerClient()
         try:
             if kind == "camera":
-                status = await self._get_status_with_retry(client=client, endpoint=endpoint, retries=3, retry_delay_seconds=0.7)
+                status = await self._get_status_with_retry(client=client, endpoint=endpoint, retries=5, retry_delay_seconds=0.8)
                 if status is None:
                     self._post({"kind": "camera_test_result", "message": "fail (status timeout)"}, sid=session_id)
                     self._post({"kind": "log", "message": "Camera test failed: status endpoint timeout."}, sid=session_id)
@@ -514,6 +557,82 @@ class DesktopBridgeApp:
                 self._post({"kind": "gps_test_result", "message": f"error ({detail})"}, sid=session_id)
         finally:
             await client.close()
+
+    async def _scan_async(
+        self,
+        endpoint: Endpoint,
+        session_id: int,
+        gps_after_timestamp_ms: Optional[int],
+    ) -> None:
+        client = MobileServerClient()
+        started = time.monotonic()
+        status_ok = False
+        health_ok = False
+        camera_ok = False
+        gps_ok = False
+        reason = ""
+
+        try:
+            status = await self._get_status_with_retry(client=client, endpoint=endpoint, retries=5, retry_delay_seconds=0.8)
+            status_ok = status is not None
+            if not status_ok:
+                reason = "status_timeout"
+                return
+
+            health_samples = []
+            for _ in range(4):
+                health_samples.append(await client.check_health(endpoint))
+                await asyncio.sleep(0.2)
+            health_ok = sum(1 for x in health_samples if x) >= 2
+            if not health_ok and not reason:
+                reason = "health_unstable"
+
+            frame = await client.get_camera_frame(endpoint)
+            camera_ok = frame is not None and len(frame) > 1024
+            if camera_ok:
+                self._post({"kind": "camera_frame", "frame": frame}, sid=session_id)
+            elif not reason:
+                reason = "camera_frame_missing"
+
+            gps_sample = await client.wait_for_new_gps_sample(endpoint, gps_after_timestamp_ms, timeout_seconds=8.0)
+            if gps_sample is None:
+                gps_sample = await client.wait_for_any_gps_sample(endpoint, timeout_seconds=4.0)
+            if gps_sample is not None:
+                now_ms = int(time.time() * 1000)
+                age_ms = max(0, now_ms - gps_sample.timestamp_ms)
+                gps_ok = age_ms <= 30_000
+                if gps_ok:
+                    self._post({"kind": "gps", "sample": gps_sample}, sid=session_id)
+                elif not reason:
+                    reason = "gps_stale"
+            elif not reason:
+                reason = "gps_missing"
+        finally:
+            await client.close()
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        all_ok = status_ok and health_ok and camera_ok and gps_ok
+        if all_ok:
+            self._post({"kind": "scan_result", "message": f"ok ({elapsed_ms}ms)"}, sid=session_id)
+            self._post({"kind": "log", "message": "Scan: status/health/camera/gps OK."}, sid=session_id)
+            return
+
+        detail = reason or "partial_failure"
+        summary = (
+            f"fail ({detail}) s={int(status_ok)} h={int(health_ok)} c={int(camera_ok)} g={int(gps_ok)} "
+            f"{elapsed_ms}ms"
+        )
+        self._post({"kind": "scan_result", "message": summary}, sid=session_id)
+        self._post(
+            {
+                "kind": "log",
+                "message": (
+                    "Scan encontrou instabilidade. "
+                    f"status={status_ok}, health={health_ok}, camera={camera_ok}, gps={gps_ok}, reason={detail}."
+                ),
+            },
+            sid=session_id,
+        )
 
     async def _get_status_with_retry(
         self,
@@ -665,14 +784,18 @@ class DesktopBridgeApp:
         async def camera_reader() -> None:
             last_ui_frame_at = 0.0
             last_signature: tuple[int, int, int] | None = None
+            last_virtual_status = ""
             while not cancel_event.is_set():
                 frame = await client.get_camera_frame(endpoint)
                 if not frame:
-                    await asyncio.sleep(0.25)
+                    await asyncio.sleep(0.35)
                     continue
 
-                video.process_frame(frame)
-                self._post({"kind": "virtual_status", "message": video.virtual_status()}, sid=session_id)
+                await asyncio.to_thread(video.process_frame, frame)
+                status_msg = video.virtual_status()
+                if status_msg != last_virtual_status:
+                    self._post({"kind": "virtual_status", "message": status_msg}, sid=session_id)
+                    last_virtual_status = status_msg
 
                 signature = (len(frame), frame[0] if frame else 0, frame[-1] if frame else 0)
                 now = time.monotonic()
@@ -681,7 +804,7 @@ class DesktopBridgeApp:
                     last_ui_frame_at = now
                     last_signature = signature
 
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.14)
 
         while not cancel_event.is_set():
             now = time.monotonic()

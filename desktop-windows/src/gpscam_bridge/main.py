@@ -8,7 +8,15 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
 
-from .constants import APP_NAME, APP_VERSION, DEFAULT_PORT, HEALTH_CHECK_INTERVAL_SECONDS
+from .constants import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_PORT,
+    GPS_RESTART_DELAYS_SECONDS,
+    HEALTH_CHECK_INTERVAL_SECONDS,
+    HEALTH_MAX_CONSECUTIVE_FAILURES,
+    HEALTH_STALE_TIMEOUT_SECONDS,
+)
 from .discovery import discover_server_on_local_subnets
 from .firewall_helper import (
     apply_firewall_rule,
@@ -346,7 +354,12 @@ class DesktopBridgeApp:
         cancel_event: threading.Event,
         session_id: int,
     ) -> bool:
-        last_health = time.monotonic()
+        last_health_ok_at = time.monotonic()
+        next_health_check_at = 0.0
+        consecutive_health_failures = 0
+        gps_restart_attempt = 0
+        gps_started_at = 0.0
+        gps_task: asyncio.Task | None = None
 
         async def gps_reader() -> None:
             async for sample in client.gps_stream(endpoint):
@@ -354,32 +367,72 @@ class DesktopBridgeApp:
                     return
                 self._post({"kind": "gps", "sample": sample}, sid=session_id)
 
-        async def health_reader() -> None:
-            nonlocal last_health
-            while not cancel_event.is_set():
-                ok = await client.check_health(endpoint)
-                if not ok:
-                    raise RuntimeError("Health check failed")
-                last_health = time.monotonic()
-                await asyncio.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
-
-        gps_task = asyncio.create_task(gps_reader())
-        health_task = asyncio.create_task(health_reader())
-
         while not cancel_event.is_set():
-            done, _ = await asyncio.wait({gps_task, health_task}, timeout=1, return_when=asyncio.FIRST_EXCEPTION)
-            if not done:
-                if time.monotonic() - last_health > (HEALTH_CHECK_INTERVAL_SECONDS * 3):
-                    break
-                continue
-            for task in done:
-                if task.exception() is not None:
-                    break
-            break
+            now = time.monotonic()
 
-        for task in (gps_task, health_task):
-            task.cancel()
-        await asyncio.gather(gps_task, health_task, return_exceptions=True)
+            if gps_task is None:
+                gps_started_at = now
+                gps_task = asyncio.create_task(gps_reader())
+
+            if now >= next_health_check_at:
+                ok = await client.check_health(endpoint)
+                next_health_check_at = time.monotonic() + HEALTH_CHECK_INTERVAL_SECONDS
+                if ok:
+                    consecutive_health_failures = 0
+                    last_health_ok_at = time.monotonic()
+                else:
+                    consecutive_health_failures += 1
+                    self._post(
+                        {
+                            "kind": "log",
+                            "message": (
+                                f"Health failed ({consecutive_health_failures}/{HEALTH_MAX_CONSECUTIVE_FAILURES}); "
+                                "keeping session alive."
+                            ),
+                        },
+                        sid=session_id,
+                    )
+                    if consecutive_health_failures >= HEALTH_MAX_CONSECUTIVE_FAILURES:
+                        break
+
+            if gps_task.done():
+                if cancel_event.is_set():
+                    break
+
+                run_duration = now - gps_started_at
+                if run_duration >= 20:
+                    gps_restart_attempt = 0
+                else:
+                    gps_restart_attempt += 1
+
+                try:
+                    gps_exception = gps_task.exception()
+                except asyncio.CancelledError:
+                    break
+
+                if gps_exception is None:
+                    self._post({"kind": "log", "message": "GPS stream closed; restarting stream..."}, sid=session_id)
+                else:
+                    self._post(
+                        {"kind": "log", "message": f"GPS stream error: {gps_exception}. Restarting..."},
+                        sid=session_id,
+                    )
+
+                delay_index = min(gps_restart_attempt, len(GPS_RESTART_DELAYS_SECONDS) - 1)
+                await asyncio.sleep(GPS_RESTART_DELAYS_SECONDS[delay_index])
+                gps_started_at = time.monotonic()
+                gps_task = asyncio.create_task(gps_reader())
+                continue
+
+            if time.monotonic() - last_health_ok_at > HEALTH_STALE_TIMEOUT_SECONDS:
+                self._post({"kind": "log", "message": "Health timeout exceeded; forcing endpoint recovery."}, sid=session_id)
+                break
+
+            await asyncio.sleep(0.2)
+
+        if gps_task is not None:
+            gps_task.cancel()
+            await asyncio.gather(gps_task, return_exceptions=True)
         return not cancel_event.is_set()
 
     def run(self) -> None:

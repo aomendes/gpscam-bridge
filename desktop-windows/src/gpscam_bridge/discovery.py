@@ -7,7 +7,7 @@ import socket
 import subprocess
 from typing import Callable, Iterable
 
-from .constants import FALLBACK_PORTS, SCAN_CONCURRENCY
+from .constants import AUTO_DETECT_PROBE_TIMEOUT_SECONDS, FALLBACK_PORTS, SCAN_CONCURRENCY
 from .models import Endpoint, ServerStatus
 from .network_client import MobileServerClient
 
@@ -76,7 +76,7 @@ async def discover_server_on_local_subnets(
     client: MobileServerClient,
     preferred_port: int,
     log: Callable[[str], None],
-    per_probe_timeout: float = 0.9,
+    per_probe_timeout: float = AUTO_DETECT_PROBE_TIMEOUT_SECONDS,
 ) -> tuple[Endpoint, ServerStatus] | tuple[None, None]:
     local_ips = _local_ipv4_addresses()
     if not local_ips:

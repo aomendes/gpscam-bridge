@@ -5,7 +5,14 @@ import ipaddress
 import time
 from typing import Callable, Optional
 
-from .constants import BACKOFF_STEPS_SECONDS, FALLBACK_PORTS, RECOVERY_TIMEOUT_SECONDS, SCAN_CONCURRENCY
+from .constants import (
+    BACKOFF_STEPS_SECONDS,
+    FALLBACK_PORTS,
+    KNOWN_HOST_PROBE_TIMEOUT_SECONDS,
+    RECOVERY_TIMEOUT_SECONDS,
+    SCAN_CONCURRENCY,
+    SUBNET_PROBE_TIMEOUT_SECONDS,
+)
 from .models import Endpoint, ServerStatus
 from .network_client import MobileServerClient
 
@@ -58,7 +65,10 @@ class EndpointRecovery:
             if time.monotonic() >= deadline:
                 return None
             endpoint = Endpoint(host=host, port=port)
-            status = await self._safe_get_status(endpoint, timeout_seconds=min(1.2, max(deadline - time.monotonic(), 0.1)))
+            status = await self._safe_get_status(
+                endpoint,
+                timeout_seconds=min(KNOWN_HOST_PROBE_TIMEOUT_SECONDS, max(deadline - time.monotonic(), 0.1)),
+            )
             if status is None:
                 continue
             if expected_server_id and status.server_id != expected_server_id:
@@ -134,7 +144,10 @@ class EndpointRecovery:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
-            status = await self._safe_get_status(endpoint, timeout_seconds=min(0.4, max(remaining, 0.1)))
+            status = await self._safe_get_status(
+                endpoint,
+                timeout_seconds=min(SUBNET_PROBE_TIMEOUT_SECONDS, max(remaining, 0.1)),
+            )
             if status is None:
                 return None
             if expected_server_id and status.server_id != expected_server_id:

@@ -21,3 +21,4 @@ __pycache__/
 # IDE
 /.idea/
 .vscode/
+/mobile-android/.idea/

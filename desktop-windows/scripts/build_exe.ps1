@@ -9,7 +9,7 @@ Push-Location $ProjectRoot
 try {
     python -m pip install -r requirements.txt
 
-    pyinstaller --noconfirm --clean --windowed --onefile --name GpsCamBridgeDesktop --paths src src\gpscam_bridge\main.py
+    pyinstaller --noconfirm --clean --windowed --onefile --name GpsCamBridgeDesktop --paths src src\desktop_entry.py
 
     if ($MobileAssetsPath -ne "") {
         New-Item -ItemType Directory -Force -Path $MobileAssetsPath | Out-Null

@@ -8,6 +8,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.call
+import io.ktor.server.application.install
 import io.ktor.server.engine.ApplicationEngine
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
@@ -86,7 +87,7 @@ class MobileServer(
             get("/download/windows") {
                 val assetPath = ServerConfig.WINDOWS_ASSET_PATH
                 val bytes = runCatching {
-                    context.assets.open(assetPath).use { it.readBytes() }
+                    this@MobileServer.context.assets.open(assetPath).use { it.readBytes() }
                 }.getOrNull()
 
                 if (bytes == null) {

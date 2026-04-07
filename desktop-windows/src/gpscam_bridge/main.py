@@ -35,7 +35,7 @@ class DesktopBridgeApp:
         self.gps_var = tk.StringVar(value="No sample")
         self.log_var = tk.StringVar(value="Ready")
 
-        self.repo_url = "https://github.com/your-org/gpscam-bridge"
+        self.repo_url = "https://github.com/aomendes/gpscam-bridge"
         self.release_url = f"{self.repo_url}/releases/latest"
 
         self._build_ui()

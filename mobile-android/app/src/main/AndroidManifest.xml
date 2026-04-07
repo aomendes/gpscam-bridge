@@ -15,7 +15,7 @@
         android:icon="@android:drawable/ic_menu_camera"
         android:label="GpsCam Bridge"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight.NoActionBar">
+        android:theme="@android:style/Theme.DeviceDefault">
 
         <activity
             android:name=".MainActivity"

@@ -30,8 +30,9 @@ class DesktopBridgeApp:
         self.root.geometry("810x450")
 
         self.events: queue.Queue[dict] = queue.Queue()
-        self.stop_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
+        self.current_session_id = 0
+        self.session_cancel_event: Optional[threading.Event] = None
 
         self.host_var = tk.StringVar(value="")
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
@@ -46,6 +47,7 @@ class DesktopBridgeApp:
         self.release_url = f"{self.repo_url}/releases/latest"
 
         self._build_ui()
+        self.root.after(200, self._drain_events)
 
     def _build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=12)
@@ -105,9 +107,6 @@ class DesktopBridgeApp:
         footer.pack(anchor=tk.E, pady=(8, 0))
 
     def start_connection(self) -> None:
-        if self.worker_thread and self.worker_thread.is_alive():
-            return
-
         host = self.host_var.get().strip()
 
         try:
@@ -116,25 +115,40 @@ class DesktopBridgeApp:
             messagebox.showerror(APP_NAME, "Porta invalida.")
             return
 
-        self.stop_event.clear()
+        # Cancel previous session (if any) and start a fresh one immediately.
+        if self.session_cancel_event is not None:
+            self.session_cancel_event.set()
+
+        self.current_session_id += 1
+        session_id = self.current_session_id
+        cancel_event = threading.Event()
+        self.session_cancel_event = cancel_event
+
         self.detect_btn.config(state=tk.DISABLED)
         self.connect_btn.config(state=tk.DISABLED)
         self.disconnect_btn.config(state=tk.NORMAL)
         self.status_var.set("Connecting")
         self.log_var.set("Auto-detecting mobile server..." if not host else "Starting connection supervisor")
 
-        self.worker_thread = threading.Thread(target=self._run_worker, args=(host, port), daemon=True)
+        self.worker_thread = threading.Thread(
+            target=self._run_worker,
+            args=(host, port, session_id, cancel_event),
+            daemon=True,
+        )
         self.worker_thread.start()
-        self._drain_events()
 
     def auto_detect_and_connect(self) -> None:
         self.host_var.set("")
         self.start_connection()
 
     def stop_connection(self) -> None:
-        self.stop_event.set()
-        self.status_var.set("Disconnecting")
-        self.log_var.set("Stopping...")
+        if self.session_cancel_event is not None:
+            self.session_cancel_event.set()
+        self.status_var.set("Disconnected")
+        self.log_var.set("Connection stopped")
+        self.detect_btn.config(state=tk.NORMAL)
+        self.connect_btn.config(state=tk.NORMAL)
+        self.disconnect_btn.config(state=tk.DISABLED)
 
     def apply_firewall_rule_clicked(self) -> None:
         ok, detail = apply_firewall_rule()
@@ -166,18 +180,13 @@ class DesktopBridgeApp:
             except queue.Empty:
                 break
             self._apply_event(event)
-
-        alive = self.worker_thread is not None and self.worker_thread.is_alive()
-        if alive:
-            self.root.after(200, self._drain_events)
-        else:
-            self.detect_btn.config(state=tk.NORMAL)
-            self.connect_btn.config(state=tk.NORMAL)
-            self.disconnect_btn.config(state=tk.DISABLED)
-            if self.stop_event.is_set():
-                self.status_var.set("Disconnected")
+        self.root.after(200, self._drain_events)
 
     def _apply_event(self, event: dict) -> None:
+        sid = event.get("sid")
+        if sid is not None and sid != self.current_session_id:
+            return
+
         kind = event.get("kind")
         if kind == "log":
             self.log_var.set(event["message"])
@@ -212,6 +221,9 @@ class DesktopBridgeApp:
         if kind == "disconnected":
             self.status_var.set("Disconnected")
             self.log_var.set(event["message"])
+            self.detect_btn.config(state=tk.NORMAL)
+            self.connect_btn.config(state=tk.NORMAL)
+            self.disconnect_btn.config(state=tk.DISABLED)
             return
 
         if kind == "firewall":
@@ -219,38 +231,46 @@ class DesktopBridgeApp:
             self.log_var.set("Connection failed after auto-recovery")
             messagebox.showwarning(APP_NAME, get_firewall_guidance())
 
-    def _post(self, event: dict) -> None:
-        self.events.put(event)
+    def _post(self, event: dict, sid: int) -> None:
+        payload = dict(event)
+        payload["sid"] = sid
+        self.events.put(payload)
 
-    def _run_worker(self, host: str, port: int) -> None:
-        asyncio.run(self._worker_loop(host, port))
+    def _run_worker(self, host: str, port: int, session_id: int, cancel_event: threading.Event) -> None:
+        asyncio.run(self._worker_loop(host, port, session_id, cancel_event))
 
-    async def _worker_loop(self, host: str, port: int) -> None:
+    async def _worker_loop(self, host: str, port: int, session_id: int, cancel_event: threading.Event) -> None:
         client = MobileServerClient()
-        recovery = EndpointRecovery(client=client, log=lambda m: self._post({"kind": "log", "message": m}))
+        recovery = EndpointRecovery(client=client, log=lambda m: self._post({"kind": "log", "message": m}, sid=session_id))
         video = VideoReceiver()
 
         try:
-            endpoint, status = await self._resolve_initial_endpoint(client=client, recovery=recovery, host=host, port=port)
+            endpoint, status = await self._resolve_initial_endpoint(
+                client=client,
+                recovery=recovery,
+                host=host,
+                port=port,
+                session_id=session_id,
+            )
             if endpoint is None or status is None:
-                self._post({"kind": "firewall"})
-                self._post({"kind": "disconnected", "message": "Unable to find mobile server"})
+                self._post({"kind": "firewall"}, sid=session_id)
+                self._post({"kind": "disconnected", "message": "Unable to find mobile server"}, sid=session_id)
                 return
 
             expected_server_id: Optional[str] = status.server_id
 
-            while not self.stop_event.is_set():
-                self._post({"kind": "connected", "status": status, "endpoint": endpoint})
+            while not cancel_event.is_set():
+                self._post({"kind": "connected", "status": status, "endpoint": endpoint}, sid=session_id)
 
                 video_state = await video.start()
-                self._post({"kind": "log", "message": video_state.detail})
+                self._post({"kind": "log", "message": video_state.detail}, sid=session_id)
 
-                disconnected = await self._run_online_loop(client, endpoint)
+                disconnected = await self._run_online_loop(client, endpoint, cancel_event, session_id)
                 await video.stop()
-                if not disconnected or self.stop_event.is_set():
+                if not disconnected or cancel_event.is_set():
                     break
 
-                self._post({"kind": "log", "message": "Connection lost. Starting silent recovery..."})
+                self._post({"kind": "log", "message": "Connection lost. Starting silent recovery..."}, sid=session_id)
                 recovered_endpoint, recovered_status = await recovery.recover(
                     initial_endpoint=endpoint,
                     expected_server_id=expected_server_id,
@@ -260,23 +280,23 @@ class DesktopBridgeApp:
                     recovered_endpoint, recovered_status = await discover_server_on_local_subnets(
                         client=client,
                         preferred_port=endpoint.port,
-                        log=lambda m: self._post({"kind": "log", "message": m}),
+                        log=lambda m: self._post({"kind": "log", "message": m}, sid=session_id),
                     )
                     if recovered_endpoint is None or recovered_status is None:
-                        self._post({"kind": "firewall"})
-                        self._post({"kind": "disconnected", "message": "Auto-recovery timeout"})
+                        self._post({"kind": "firewall"}, sid=session_id)
+                        self._post({"kind": "disconnected", "message": "Auto-recovery timeout"}, sid=session_id)
                         return
 
                 endpoint = recovered_endpoint
-                self._post({"kind": "autodetected", "endpoint": endpoint})
-                self._post({"kind": "connected", "status": recovered_status, "endpoint": endpoint})
+                self._post({"kind": "autodetected", "endpoint": endpoint}, sid=session_id)
+                self._post({"kind": "connected", "status": recovered_status, "endpoint": endpoint}, sid=session_id)
                 status = recovered_status
 
         except Exception as exc:
-            self._post({"kind": "disconnected", "message": f"Fatal error: {exc}"})
+            self._post({"kind": "disconnected", "message": f"Fatal error: {exc}"}, sid=session_id)
         finally:
             await client.close()
-            self._post({"kind": "disconnected", "message": "Connection stopped"})
+            self._post({"kind": "disconnected", "message": "Connection stopped"}, sid=session_id)
 
     async def _resolve_initial_endpoint(
         self,
@@ -284,15 +304,16 @@ class DesktopBridgeApp:
         recovery: EndpointRecovery,
         host: str,
         port: int,
+        session_id: int,
     ) -> tuple[Endpoint, ServerStatus] | tuple[None, None]:
         endpoint: Endpoint | None = Endpoint(host=host, port=port) if host else None
 
         if endpoint is not None:
             try:
-                status = await self._connect_once(client, endpoint)
+                status = await self._connect_once(client, endpoint, session_id)
                 return endpoint, status
             except Exception:
-                self._post({"kind": "log", "message": "Initial connection failed. Trying silent auto-detect..."})
+                self._post({"kind": "log", "message": "Initial connection failed. Trying silent auto-detect..."}, sid=session_id)
 
             recovered_endpoint, recovered_status = await recovery.recover(
                 initial_endpoint=endpoint,
@@ -300,36 +321,42 @@ class DesktopBridgeApp:
                 timeout_seconds=12,
             )
             if recovered_endpoint is not None and recovered_status is not None:
-                self._post({"kind": "autodetected", "endpoint": recovered_endpoint})
+                self._post({"kind": "autodetected", "endpoint": recovered_endpoint}, sid=session_id)
                 return recovered_endpoint, recovered_status
 
         discovered_endpoint, discovered_status = await discover_server_on_local_subnets(
             client=client,
             preferred_port=port,
-            log=lambda m: self._post({"kind": "log", "message": m}),
+            log=lambda m: self._post({"kind": "log", "message": m}, sid=session_id),
         )
         if discovered_endpoint is not None and discovered_status is not None:
-            self._post({"kind": "autodetected", "endpoint": discovered_endpoint})
+            self._post({"kind": "autodetected", "endpoint": discovered_endpoint}, sid=session_id)
             return discovered_endpoint, discovered_status
 
         return None, None
 
-    async def _connect_once(self, client: MobileServerClient, endpoint: Endpoint) -> ServerStatus:
-        self._post({"kind": "log", "message": f"Connecting to {endpoint.host}:{endpoint.port}"})
+    async def _connect_once(self, client: MobileServerClient, endpoint: Endpoint, session_id: int) -> ServerStatus:
+        self._post({"kind": "log", "message": f"Connecting to {endpoint.host}:{endpoint.port}"}, sid=session_id)
         return await client.get_status(endpoint)
 
-    async def _run_online_loop(self, client: MobileServerClient, endpoint: Endpoint) -> bool:
+    async def _run_online_loop(
+        self,
+        client: MobileServerClient,
+        endpoint: Endpoint,
+        cancel_event: threading.Event,
+        session_id: int,
+    ) -> bool:
         last_health = time.monotonic()
 
         async def gps_reader() -> None:
             async for sample in client.gps_stream(endpoint):
-                if self.stop_event.is_set():
+                if cancel_event.is_set():
                     return
-                self._post({"kind": "gps", "sample": sample})
+                self._post({"kind": "gps", "sample": sample}, sid=session_id)
 
         async def health_reader() -> None:
             nonlocal last_health
-            while not self.stop_event.is_set():
+            while not cancel_event.is_set():
                 ok = await client.check_health(endpoint)
                 if not ok:
                     raise RuntimeError("Health check failed")
@@ -339,7 +366,7 @@ class DesktopBridgeApp:
         gps_task = asyncio.create_task(gps_reader())
         health_task = asyncio.create_task(health_reader())
 
-        while not self.stop_event.is_set():
+        while not cancel_event.is_set():
             done, _ = await asyncio.wait({gps_task, health_task}, timeout=1, return_when=asyncio.FIRST_EXCEPTION)
             if not done:
                 if time.monotonic() - last_health > (HEALTH_CHECK_INTERVAL_SECONDS * 3):
@@ -353,7 +380,7 @@ class DesktopBridgeApp:
         for task in (gps_task, health_task):
             task.cancel()
         await asyncio.gather(gps_task, health_task, return_exceptions=True)
-        return not self.stop_event.is_set()
+        return not cancel_event.is_set()
 
     def run(self) -> None:
         self.root.mainloop()

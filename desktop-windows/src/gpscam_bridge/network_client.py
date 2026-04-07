@@ -61,6 +61,23 @@ class MobileServerClient:
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     raise ws.exception() or RuntimeError("WebSocket error")
 
+    async def wait_for_new_gps_sample(
+        self,
+        endpoint: Endpoint,
+        after_timestamp_ms: Optional[int],
+        timeout_seconds: float = 8.0,
+    ) -> Optional[GpsSample]:
+        async def _await_sample() -> Optional[GpsSample]:
+            async for sample in self.gps_stream(endpoint):
+                if after_timestamp_ms is None or sample.timestamp_ms > after_timestamp_ms:
+                    return sample
+            return None
+
+        try:
+            return await asyncio.wait_for(_await_sample(), timeout=timeout_seconds)
+        except (asyncio.TimeoutError, aiohttp.ClientError):
+            return None
+
     async def post_webrtc_offer(self, endpoint: Endpoint, offer: dict) -> dict:
         # Signaling endpoint required by contract. App currently uses status only.
         async with self._session.post(f"{endpoint.base_url}/api/webrtc/offer", json=offer) as response:

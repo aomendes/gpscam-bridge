@@ -49,7 +49,10 @@ class DesktopBridgeApp:
         self.server_var = tk.StringVar(value="-")
         self.camera_var = tk.StringVar(value="unknown")
         self.gps_var = tk.StringVar(value="No sample")
+        self.camera_test_var = tk.StringVar(value="not run")
+        self.gps_test_var = tk.StringVar(value="not run")
         self.log_var = tk.StringVar(value="Ready")
+        self.latest_gps_timestamp_ms: Optional[int] = None
 
         self.repo_url = "https://github.com/aomendes/gpscam-bridge"
         self.release_url = f"{self.repo_url}/releases/latest"
@@ -88,6 +91,8 @@ class DesktopBridgeApp:
             ("Server ID", self.server_var),
             ("Camera", self.camera_var),
             ("GPS", self.gps_var),
+            ("Cam Test", self.camera_test_var),
+            ("GPS Test", self.gps_test_var),
             ("Log", self.log_var),
         ]
 
@@ -100,6 +105,10 @@ class DesktopBridgeApp:
         ttk.Button(actions, text="Apply Firewall Rule", command=self.apply_firewall_rule_clicked).pack(
             side=tk.LEFT, padx=8, pady=8
         )
+        self.camera_test_btn = ttk.Button(actions, text="Test Camera", command=self.run_camera_test_clicked, state=tk.DISABLED)
+        self.camera_test_btn.pack(side=tk.LEFT, padx=8, pady=8)
+        self.gps_test_btn = ttk.Button(actions, text="Test GPS", command=self.run_gps_test_clicked, state=tk.DISABLED)
+        self.gps_test_btn.pack(side=tk.LEFT, padx=8, pady=8)
         ttk.Button(actions, text="Copy Firewall Cmd", command=self.copy_firewall_command_clicked).pack(
             side=tk.LEFT, padx=8, pady=8
         )
@@ -135,6 +144,12 @@ class DesktopBridgeApp:
         self.detect_btn.config(state=tk.DISABLED)
         self.connect_btn.config(state=tk.DISABLED)
         self.disconnect_btn.config(state=tk.NORMAL)
+        self.camera_test_btn.config(state=tk.DISABLED)
+        self.gps_test_btn.config(state=tk.DISABLED)
+        self.camera_test_var.set("pending")
+        self.gps_test_var.set("pending")
+        self.latest_gps_timestamp_ms = None
+        self.gps_var.set("No sample")
         self.status_var.set("Connecting")
         self.log_var.set("Auto-detecting mobile server..." if not host else "Starting connection supervisor")
 
@@ -157,6 +172,12 @@ class DesktopBridgeApp:
         self.detect_btn.config(state=tk.NORMAL)
         self.connect_btn.config(state=tk.NORMAL)
         self.disconnect_btn.config(state=tk.DISABLED)
+        self.camera_test_btn.config(state=tk.DISABLED)
+        self.gps_test_btn.config(state=tk.DISABLED)
+        self.camera_test_var.set("not run")
+        self.gps_test_var.set("not run")
+        self.latest_gps_timestamp_ms = None
+        self.gps_var.set("No sample")
 
     def apply_firewall_rule_clicked(self) -> None:
         ok, detail = apply_firewall_rule()
@@ -209,6 +230,8 @@ class DesktopBridgeApp:
             self.endpoint_var.set(f"{endpoint.host}:{endpoint.port}")
             self.server_var.set(status.server_id)
             self.camera_var.set(status.camera_state)
+            self.camera_test_btn.config(state=tk.NORMAL)
+            self.gps_test_btn.config(state=tk.NORMAL)
             self.log_var.set("Stream active")
             return
 
@@ -221,9 +244,31 @@ class DesktopBridgeApp:
 
         if kind == "gps":
             sample: GpsSample = event["sample"]
+            if self.latest_gps_timestamp_ms is not None and sample.timestamp_ms <= self.latest_gps_timestamp_ms:
+                return
+            self.latest_gps_timestamp_ms = sample.timestamp_ms
             self.gps_var.set(
                 f"lat={sample.latitude:.6f}, lon={sample.longitude:.6f}, acc={sample.accuracy_m:.1f}m"
             )
+            return
+
+        if kind == "camera_test_result":
+            self.camera_test_var.set(event["message"])
+            if self.status_var.get() == "Connected":
+                self.camera_test_btn.config(state=tk.NORMAL)
+            return
+
+        if kind == "gps_test_result":
+            self.gps_test_var.set(event["message"])
+            if self.status_var.get() == "Connected":
+                self.gps_test_btn.config(state=tk.NORMAL)
+            if event.get("sample") is not None:
+                sample: GpsSample = event["sample"]
+                if self.latest_gps_timestamp_ms is None or sample.timestamp_ms > self.latest_gps_timestamp_ms:
+                    self.latest_gps_timestamp_ms = sample.timestamp_ms
+                    self.gps_var.set(
+                        f"lat={sample.latitude:.6f}, lon={sample.longitude:.6f}, acc={sample.accuracy_m:.1f}m"
+                    )
             return
 
         if kind == "disconnected":
@@ -232,12 +277,116 @@ class DesktopBridgeApp:
             self.detect_btn.config(state=tk.NORMAL)
             self.connect_btn.config(state=tk.NORMAL)
             self.disconnect_btn.config(state=tk.DISABLED)
+            self.camera_test_btn.config(state=tk.DISABLED)
+            self.gps_test_btn.config(state=tk.DISABLED)
             return
 
         if kind == "firewall":
             self.status_var.set("Needs attention")
             self.log_var.set("Connection failed after auto-recovery")
             messagebox.showwarning(APP_NAME, get_firewall_guidance())
+
+    def run_camera_test_clicked(self) -> None:
+        self._start_diag_test(kind="camera")
+
+    def run_gps_test_clicked(self) -> None:
+        self._start_diag_test(kind="gps")
+
+    def _endpoint_from_inputs(self) -> Endpoint | None:
+        host = self.host_var.get().strip()
+        if not host:
+            return None
+        try:
+            port = int(self.port_var.get().strip())
+        except ValueError:
+            return None
+        return Endpoint(host=host, port=port)
+
+    def _start_diag_test(self, kind: str) -> None:
+        if self.status_var.get() != "Connected":
+            messagebox.showwarning(APP_NAME, "Conecte primeiro antes de rodar testes.")
+            return
+
+        endpoint = self._endpoint_from_inputs()
+        if endpoint is None:
+            messagebox.showerror(APP_NAME, "Endpoint invalido para teste.")
+            return
+
+        session_id = self.current_session_id
+        if kind == "camera":
+            self.camera_test_var.set("running...")
+            self.camera_test_btn.config(state=tk.DISABLED)
+        else:
+            self.gps_test_var.set("running...")
+            self.gps_test_btn.config(state=tk.DISABLED)
+
+        thread = threading.Thread(
+            target=self._run_diag_test_worker,
+            args=(kind, endpoint, session_id, self.latest_gps_timestamp_ms),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_diag_test_worker(
+        self,
+        kind: str,
+        endpoint: Endpoint,
+        session_id: int,
+        gps_after_timestamp_ms: Optional[int],
+    ) -> None:
+        asyncio.run(self._diag_test_async(kind, endpoint, session_id, gps_after_timestamp_ms))
+
+    async def _diag_test_async(
+        self,
+        kind: str,
+        endpoint: Endpoint,
+        session_id: int,
+        gps_after_timestamp_ms: Optional[int],
+    ) -> None:
+        client = MobileServerClient()
+        try:
+            if kind == "camera":
+                status = await client.get_status(endpoint)
+                camera_state = status.camera_state.lower()
+                if camera_state in {"ready", "signaling", "connecting"}:
+                    self._post({"kind": "camera_test_result", "message": f"ok ({status.camera_state})"}, sid=session_id)
+                    self._post({"kind": "log", "message": "Camera test passed."}, sid=session_id)
+                else:
+                    self._post({"kind": "camera_test_result", "message": f"fail ({status.camera_state})"}, sid=session_id)
+                    self._post(
+                        {"kind": "log", "message": "Camera test failed: camera state is not ready."},
+                        sid=session_id,
+                    )
+                return
+
+            sample = await client.wait_for_new_gps_sample(
+                endpoint=endpoint,
+                after_timestamp_ms=gps_after_timestamp_ms,
+                timeout_seconds=10.0,
+            )
+            if sample is None:
+                self._post({"kind": "gps_test_result", "message": "fail (no new sample)"}, sid=session_id)
+                self._post(
+                    {
+                        "kind": "log",
+                        "message": "GPS test failed: no new GPS sample received in 10s.",
+                    },
+                    sid=session_id,
+                )
+                return
+
+            self._post(
+                {"kind": "gps_test_result", "message": f"ok ({sample.timestamp_ms})", "sample": sample},
+                sid=session_id,
+            )
+            self._post({"kind": "log", "message": "GPS test passed with a fresh sample."}, sid=session_id)
+        except Exception as exc:
+            if kind == "camera":
+                self._post({"kind": "camera_test_result", "message": f"error ({exc})"}, sid=session_id)
+            else:
+                self._post({"kind": "gps_test_result", "message": f"error ({exc})"}, sid=session_id)
+        finally:
+            await client.close()
 
     def _post(self, event: dict, sid: int) -> None:
         payload = dict(event)

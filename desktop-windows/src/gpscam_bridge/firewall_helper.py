@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 import subprocess
 import webbrowser
+import tempfile
 from pathlib import Path
 
 
@@ -33,17 +35,8 @@ def open_repo_or_release(url: str) -> None:
     webbrowser.open(url)
 
 
-def firewall_command_preview() -> str:
-    return (
-        "netsh advfirewall firewall add rule "
-        "name=\"GpsCam Bridge TCP In\" dir=in action=allow protocol=TCP localport=8765-8775 profile=private"
-    )
-
-
-def apply_firewall_rule() -> tuple[bool, str]:
-    exe_path = str(Path(sys.executable).resolve())
-
-    commands = [
+def _command_tokens(exe_path: str) -> list[list[str]]:
+    return [
         [
             "netsh",
             "advfirewall",
@@ -98,12 +91,62 @@ def apply_firewall_rule() -> tuple[bool, str]:
         ],
     ]
 
+
+def _powershell_lines(exe_path: str) -> list[str]:
+    return [
+        "netsh advfirewall firewall add rule name=\"GpsCam Bridge TCP In\" dir=in action=allow protocol=TCP localport=8765-8775 profile=private",
+        "netsh advfirewall firewall add rule name=\"GpsCam Bridge TCP Out\" dir=out action=allow protocol=TCP remoteport=8765-8775 profile=private",
+        f"netsh advfirewall firewall add rule name=\"GpsCam Bridge Program In\" dir=in action=allow program=\"{exe_path}\" enable=yes profile=private",
+        f"netsh advfirewall firewall add rule name=\"GpsCam Bridge Program Out\" dir=out action=allow program=\"{exe_path}\" enable=yes profile=private",
+    ]
+
+
+def firewall_command_preview() -> str:
+    exe_path = str(Path(sys.executable).resolve())
+    return " ; ".join(_powershell_lines(exe_path))
+
+
+def firewall_commands_for_copy() -> str:
+    exe_path = str(Path(sys.executable).resolve())
+    return "\n".join(_powershell_lines(exe_path))
+
+
+def _launch_elevated_firewall_script() -> tuple[bool, str]:
+    exe_path = str(Path(sys.executable).resolve())
+    script_body = "\n".join(_powershell_lines(exe_path))
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".ps1", encoding="utf-8") as script_file:
+        script_file.write("$ErrorActionPreference = 'Stop'\n")
+        script_file.write(script_body)
+        script_file.write("\n")
+        script_path = script_file.name
+
+    result = ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        "powershell.exe",
+        f'-NoProfile -ExecutionPolicy Bypass -File "{script_path}"',
+        None,
+        1,
+    )
+    if result <= 32:
+        return False, f"Unable to request admin elevation (code={result})."
+    return True, "Admin prompt opened. Approve UAC to apply firewall rules."
+
+
+def apply_firewall_rule() -> tuple[bool, str]:
+    exe_path = str(Path(sys.executable).resolve())
+    commands = _command_tokens(exe_path)
+
     outputs: list[str] = []
     for cmd in commands:
         result = subprocess.run(cmd, capture_output=True, text=True)
         combined = "\n".join([result.stdout.strip(), result.stderr.strip()]).strip()
         outputs.append(combined)
         if result.returncode != 0:
-            return False, combined or "Failed to add firewall rule."
+            # Likely permission issue; ask for elevation automatically.
+            elevated_ok, elevated_msg = _launch_elevated_firewall_script()
+            if elevated_ok:
+                return True, elevated_msg
+            return False, (combined or "Failed to add firewall rule.") + f"\n{elevated_msg}"
 
     return True, "\n".join(outputs).strip() or "Firewall rules applied."

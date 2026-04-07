@@ -12,7 +12,7 @@ from .constants import APP_NAME, APP_VERSION, DEFAULT_PORT, HEALTH_CHECK_INTERVA
 from .discovery import discover_server_on_local_subnets
 from .firewall_helper import (
     apply_firewall_rule,
-    firewall_command_preview,
+    firewall_commands_for_copy,
     get_firewall_guidance,
     open_firewall_settings,
     open_repo_or_release,
@@ -90,6 +90,9 @@ class DesktopBridgeApp:
         ttk.Button(actions, text="Apply Firewall Rule", command=self.apply_firewall_rule_clicked).pack(
             side=tk.LEFT, padx=8, pady=8
         )
+        ttk.Button(actions, text="Copy Firewall Cmd", command=self.copy_firewall_command_clicked).pack(
+            side=tk.LEFT, padx=8, pady=8
+        )
         ttk.Button(actions, text="Open Firewall Settings", command=open_firewall_settings).pack(side=tk.LEFT, padx=8, pady=8)
         ttk.Button(actions, text="GitHub Release", command=lambda: open_repo_or_release(self.release_url)).pack(
             side=tk.LEFT, padx=8, pady=8
@@ -136,15 +139,25 @@ class DesktopBridgeApp:
     def apply_firewall_rule_clicked(self) -> None:
         ok, detail = apply_firewall_rule()
         if ok:
-            messagebox.showinfo(APP_NAME, "Firewall liberado com sucesso para GpsCam Bridge.")
+            messagebox.showinfo(APP_NAME, f"Firewall: {detail}")
         else:
+            self._copy_to_clipboard(firewall_commands_for_copy())
             messagebox.showwarning(
                 APP_NAME,
                 "Falha ao aplicar regra automaticamente.\n"
-                "Abra PowerShell como administrador e rode:\n\n"
-                f"{firewall_command_preview()}\n\n"
+                "O comando completo foi copiado para a area de transferencia.\n"
+                "Abra PowerShell como administrador e cole para executar.\n\n"
                 f"Detalhe: {detail}",
             )
+
+    def copy_firewall_command_clicked(self) -> None:
+        self._copy_to_clipboard(firewall_commands_for_copy())
+        messagebox.showinfo(APP_NAME, "Comando de firewall copiado. Cole no PowerShell (Admin).")
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update()
 
     def _drain_events(self) -> None:
         while True:

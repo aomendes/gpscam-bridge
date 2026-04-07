@@ -9,7 +9,14 @@ from tkinter import messagebox, ttk
 from typing import Optional
 
 from .constants import APP_NAME, APP_VERSION, DEFAULT_PORT, HEALTH_CHECK_INTERVAL_SECONDS
-from .firewall_helper import get_firewall_guidance, open_firewall_settings, open_repo_or_release
+from .discovery import discover_server_on_local_subnets
+from .firewall_helper import (
+    apply_firewall_rule,
+    firewall_command_preview,
+    get_firewall_guidance,
+    open_firewall_settings,
+    open_repo_or_release,
+)
 from .models import Endpoint, GpsSample, ServerStatus
 from .network_client import MobileServerClient
 from .recovery import EndpointRecovery
@@ -20,13 +27,13 @@ class DesktopBridgeApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} Desktop")
-        self.root.geometry("720x420")
+        self.root.geometry("810x450")
 
         self.events: queue.Queue[dict] = queue.Queue()
         self.stop_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
 
-        self.host_var = tk.StringVar(value="192.168.0.10")
+        self.host_var = tk.StringVar(value="")
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
         self.status_var = tk.StringVar(value="Disconnected")
         self.endpoint_var = tk.StringVar(value="-")
@@ -53,11 +60,14 @@ class DesktopBridgeApp:
         ttk.Label(top, text="Port").grid(row=0, column=2, padx=8, pady=8, sticky=tk.W)
         ttk.Entry(top, textvariable=self.port_var, width=8).grid(row=0, column=3, padx=8, pady=8, sticky=tk.W)
 
+        self.detect_btn = ttk.Button(top, text="Auto Detect", command=self.auto_detect_and_connect)
+        self.detect_btn.grid(row=0, column=4, padx=8, pady=8)
+
         self.connect_btn = ttk.Button(top, text="Connect", command=self.start_connection)
-        self.connect_btn.grid(row=0, column=4, padx=8, pady=8)
+        self.connect_btn.grid(row=0, column=5, padx=8, pady=8)
 
         self.disconnect_btn = ttk.Button(top, text="Disconnect", command=self.stop_connection, state=tk.DISABLED)
-        self.disconnect_btn.grid(row=0, column=5, padx=8, pady=8)
+        self.disconnect_btn.grid(row=0, column=6, padx=8, pady=8)
 
         status = ttk.LabelFrame(frame, text="Status")
         status.pack(fill=tk.X, pady=(0, 12))
@@ -77,6 +87,9 @@ class DesktopBridgeApp:
 
         actions = ttk.LabelFrame(frame, text="Guided Actions")
         actions.pack(fill=tk.X)
+        ttk.Button(actions, text="Apply Firewall Rule", command=self.apply_firewall_rule_clicked).pack(
+            side=tk.LEFT, padx=8, pady=8
+        )
         ttk.Button(actions, text="Open Firewall Settings", command=open_firewall_settings).pack(side=tk.LEFT, padx=8, pady=8)
         ttk.Button(actions, text="GitHub Release", command=lambda: open_repo_or_release(self.release_url)).pack(
             side=tk.LEFT, padx=8, pady=8
@@ -93,9 +106,6 @@ class DesktopBridgeApp:
             return
 
         host = self.host_var.get().strip()
-        if not host:
-            messagebox.showerror(APP_NAME, "Informe o IP do celular.")
-            return
 
         try:
             port = int(self.port_var.get().strip())
@@ -104,19 +114,37 @@ class DesktopBridgeApp:
             return
 
         self.stop_event.clear()
+        self.detect_btn.config(state=tk.DISABLED)
         self.connect_btn.config(state=tk.DISABLED)
         self.disconnect_btn.config(state=tk.NORMAL)
         self.status_var.set("Connecting")
-        self.log_var.set("Starting connection supervisor")
+        self.log_var.set("Auto-detecting mobile server..." if not host else "Starting connection supervisor")
 
         self.worker_thread = threading.Thread(target=self._run_worker, args=(host, port), daemon=True)
         self.worker_thread.start()
         self._drain_events()
 
+    def auto_detect_and_connect(self) -> None:
+        self.host_var.set("")
+        self.start_connection()
+
     def stop_connection(self) -> None:
         self.stop_event.set()
         self.status_var.set("Disconnecting")
         self.log_var.set("Stopping...")
+
+    def apply_firewall_rule_clicked(self) -> None:
+        ok, detail = apply_firewall_rule()
+        if ok:
+            messagebox.showinfo(APP_NAME, "Firewall liberado com sucesso para GpsCam Bridge.")
+        else:
+            messagebox.showwarning(
+                APP_NAME,
+                "Falha ao aplicar regra automaticamente.\n"
+                "Abra PowerShell como administrador e rode:\n\n"
+                f"{firewall_command_preview()}\n\n"
+                f"Detalhe: {detail}",
+            )
 
     def _drain_events(self) -> None:
         while True:
@@ -130,6 +158,7 @@ class DesktopBridgeApp:
         if alive:
             self.root.after(200, self._drain_events)
         else:
+            self.detect_btn.config(state=tk.NORMAL)
             self.connect_btn.config(state=tk.NORMAL)
             self.disconnect_btn.config(state=tk.DISABLED)
             if self.stop_event.is_set():
@@ -145,10 +174,19 @@ class DesktopBridgeApp:
             status: ServerStatus = event["status"]
             endpoint: Endpoint = event["endpoint"]
             self.status_var.set("Connected")
+            self.host_var.set(endpoint.host)
+            self.port_var.set(str(endpoint.port))
             self.endpoint_var.set(f"{endpoint.host}:{endpoint.port}")
             self.server_var.set(status.server_id)
             self.camera_var.set(status.camera_state)
             self.log_var.set("Stream active")
+            return
+
+        if kind == "autodetected":
+            endpoint: Endpoint = event["endpoint"]
+            self.host_var.set(endpoint.host)
+            self.port_var.set(str(endpoint.port))
+            self.log_var.set(f"Auto-detected {endpoint.host}:{endpoint.port}")
             return
 
         if kind == "gps":
@@ -175,17 +213,20 @@ class DesktopBridgeApp:
         asyncio.run(self._worker_loop(host, port))
 
     async def _worker_loop(self, host: str, port: int) -> None:
-        endpoint = Endpoint(host=host, port=port)
         client = MobileServerClient()
         recovery = EndpointRecovery(client=client, log=lambda m: self._post({"kind": "log", "message": m}))
         video = VideoReceiver()
 
-        expected_server_id: Optional[str] = None
-
         try:
+            endpoint, status = await self._resolve_initial_endpoint(client=client, recovery=recovery, host=host, port=port)
+            if endpoint is None or status is None:
+                self._post({"kind": "firewall"})
+                self._post({"kind": "disconnected", "message": "Unable to find mobile server"})
+                return
+
+            expected_server_id: Optional[str] = status.server_id
+
             while not self.stop_event.is_set():
-                status = await self._connect_once(client, endpoint)
-                expected_server_id = expected_server_id or status.server_id
                 self._post({"kind": "connected", "status": status, "endpoint": endpoint})
 
                 video_state = await video.start()
@@ -203,18 +244,62 @@ class DesktopBridgeApp:
                 )
 
                 if recovered_endpoint is None or recovered_status is None:
-                    self._post({"kind": "firewall"})
-                    self._post({"kind": "disconnected", "message": "Auto-recovery timeout"})
-                    return
+                    recovered_endpoint, recovered_status = await discover_server_on_local_subnets(
+                        client=client,
+                        preferred_port=endpoint.port,
+                        log=lambda m: self._post({"kind": "log", "message": m}),
+                    )
+                    if recovered_endpoint is None or recovered_status is None:
+                        self._post({"kind": "firewall"})
+                        self._post({"kind": "disconnected", "message": "Auto-recovery timeout"})
+                        return
 
                 endpoint = recovered_endpoint
+                self._post({"kind": "autodetected", "endpoint": endpoint})
                 self._post({"kind": "connected", "status": recovered_status, "endpoint": endpoint})
+                status = recovered_status
 
         except Exception as exc:
             self._post({"kind": "disconnected", "message": f"Fatal error: {exc}"})
         finally:
             await client.close()
             self._post({"kind": "disconnected", "message": "Connection stopped"})
+
+    async def _resolve_initial_endpoint(
+        self,
+        client: MobileServerClient,
+        recovery: EndpointRecovery,
+        host: str,
+        port: int,
+    ) -> tuple[Endpoint, ServerStatus] | tuple[None, None]:
+        endpoint: Endpoint | None = Endpoint(host=host, port=port) if host else None
+
+        if endpoint is not None:
+            try:
+                status = await self._connect_once(client, endpoint)
+                return endpoint, status
+            except Exception:
+                self._post({"kind": "log", "message": "Initial connection failed. Trying silent auto-detect..."})
+
+            recovered_endpoint, recovered_status = await recovery.recover(
+                initial_endpoint=endpoint,
+                expected_server_id=None,
+                timeout_seconds=12,
+            )
+            if recovered_endpoint is not None and recovered_status is not None:
+                self._post({"kind": "autodetected", "endpoint": recovered_endpoint})
+                return recovered_endpoint, recovered_status
+
+        discovered_endpoint, discovered_status = await discover_server_on_local_subnets(
+            client=client,
+            preferred_port=port,
+            log=lambda m: self._post({"kind": "log", "message": m}),
+        )
+        if discovered_endpoint is not None and discovered_status is not None:
+            self._post({"kind": "autodetected", "endpoint": discovered_endpoint})
+            return discovered_endpoint, discovered_status
+
+        return None, None
 
     async def _connect_once(self, client: MobileServerClient, endpoint: Endpoint) -> ServerStatus:
         self._post({"kind": "log", "message": f"Connecting to {endpoint.host}:{endpoint.port}"})

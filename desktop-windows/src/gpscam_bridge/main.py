@@ -346,7 +346,11 @@ class DesktopBridgeApp:
         client = MobileServerClient()
         try:
             if kind == "camera":
-                status = await client.get_status(endpoint)
+                status = await self._get_status_with_retry(client=client, endpoint=endpoint, retries=3, retry_delay_seconds=0.7)
+                if status is None:
+                    self._post({"kind": "camera_test_result", "message": "fail (status timeout)"}, sid=session_id)
+                    self._post({"kind": "log", "message": "Camera test failed: status endpoint timeout."}, sid=session_id)
+                    return
                 camera_state = status.camera_state.lower()
                 if camera_state in {"ready", "signaling", "connecting"}:
                     self._post({"kind": "camera_test_result", "message": f"ok ({status.camera_state})"}, sid=session_id)
@@ -362,15 +366,35 @@ class DesktopBridgeApp:
             sample = await client.wait_for_new_gps_sample(
                 endpoint=endpoint,
                 after_timestamp_ms=gps_after_timestamp_ms,
-                timeout_seconds=10.0,
+                timeout_seconds=9.0,
             )
             if sample is None:
-                self._post({"kind": "gps_test_result", "message": "fail (no new sample)"}, sid=session_id)
+                sample = await client.wait_for_any_gps_sample(endpoint=endpoint, timeout_seconds=4.0)
+                if sample is None:
+                    self._post({"kind": "gps_test_result", "message": "fail (no sample)"}, sid=session_id)
+                    self._post({"kind": "log", "message": "GPS test failed: no GPS sample received."}, sid=session_id)
+                    return
+
+                now_ms = int(time.time() * 1000)
+                age_ms = max(0, now_ms - sample.timestamp_ms)
+                if age_ms <= 30_000:
+                    self._post(
+                        {
+                            "kind": "gps_test_result",
+                            "message": f"ok (recent {age_ms // 1000}s)",
+                            "sample": sample,
+                        },
+                        sid=session_id,
+                    )
+                    self._post(
+                        {"kind": "log", "message": "GPS test passed with recent sample (stationary fallback)."},
+                        sid=session_id,
+                    )
+                    return
+
+                self._post({"kind": "gps_test_result", "message": "fail (stale sample)"}, sid=session_id)
                 self._post(
-                    {
-                        "kind": "log",
-                        "message": "GPS test failed: no new GPS sample received in 10s.",
-                    },
+                    {"kind": "log", "message": "GPS test failed: only stale GPS sample available."},
                     sid=session_id,
                 )
                 return
@@ -381,12 +405,28 @@ class DesktopBridgeApp:
             )
             self._post({"kind": "log", "message": "GPS test passed with a fresh sample."}, sid=session_id)
         except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
             if kind == "camera":
-                self._post({"kind": "camera_test_result", "message": f"error ({exc})"}, sid=session_id)
+                self._post({"kind": "camera_test_result", "message": f"error ({detail})"}, sid=session_id)
             else:
-                self._post({"kind": "gps_test_result", "message": f"error ({exc})"}, sid=session_id)
+                self._post({"kind": "gps_test_result", "message": f"error ({detail})"}, sid=session_id)
         finally:
             await client.close()
+
+    async def _get_status_with_retry(
+        self,
+        client: MobileServerClient,
+        endpoint: Endpoint,
+        retries: int,
+        retry_delay_seconds: float,
+    ) -> Optional[ServerStatus]:
+        for attempt in range(1, retries + 1):
+            try:
+                return await client.get_status(endpoint)
+            except Exception:
+                if attempt >= retries:
+                    return None
+                await asyncio.sleep(retry_delay_seconds)
 
     def _post(self, event: dict, sid: int) -> None:
         payload = dict(event)

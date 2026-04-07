@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
             MainScreen(
                 state = state,
                 onStartClick = {
-                    viewModel.startServer()
+                    viewModel.startServer(this)
                     viewModel.onPermissionsReady()
                 },
                 onStopClick = {

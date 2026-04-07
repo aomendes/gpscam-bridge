@@ -1,6 +1,7 @@
 package com.gpscambridge.mobile.ui
 
 import android.app.Application
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gpscambridge.mobile.location.GpsPublisher
@@ -83,12 +84,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startServer() {
+    fun startServer(lifecycleOwner: LifecycleOwner) {
         val ip = LocalIpResolver.resolve()
         _uiState.value = _uiState.value.copy(ip = ip, log = "Starting local server...")
 
         runCatching {
-            cameraStreamer.start()
+            cameraStreamer.start(lifecycleOwner)
             val boundPort = mobileServer.start()
             _uiState.value = _uiState.value.copy(
                 running = true,

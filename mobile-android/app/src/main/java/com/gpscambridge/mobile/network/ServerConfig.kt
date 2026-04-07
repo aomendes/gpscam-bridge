@@ -1,7 +1,7 @@
 package com.gpscambridge.mobile.network
 
 object ServerConfig {
-    const val APP_VERSION = "0.1.7"
+    const val APP_VERSION = "0.2.0"
     const val DEFAULT_PORT = 8765
     const val MAX_PORT = 8775
     const val SERVER_HOST = "0.0.0.0"

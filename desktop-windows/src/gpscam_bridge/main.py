@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import queue
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
+
+from PIL import Image, ImageTk
 
 from .constants import (
     APP_NAME,
@@ -35,12 +38,13 @@ class DesktopBridgeApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} Desktop")
-        self.root.geometry("810x450")
+        self.root.geometry("980x760")
 
         self.events: queue.Queue[dict] = queue.Queue()
         self.worker_thread: Optional[threading.Thread] = None
         self.current_session_id = 0
         self.session_cancel_event: Optional[threading.Event] = None
+        self.video_receiver = VideoReceiver()
 
         self.host_var = tk.StringVar(value="")
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
@@ -51,8 +55,10 @@ class DesktopBridgeApp:
         self.gps_var = tk.StringVar(value="No sample")
         self.camera_test_var = tk.StringVar(value="not run")
         self.gps_test_var = tk.StringVar(value="not run")
+        self.virtual_cam_var = tk.StringVar(value="disabled")
         self.log_var = tk.StringVar(value="Ready")
         self.latest_gps_timestamp_ms: Optional[int] = None
+        self.preview_image_ref: Optional[ImageTk.PhotoImage] = None
 
         self.repo_url = "https://github.com/aomendes/gpscam-bridge"
         self.release_url = f"{self.repo_url}/releases/latest"
@@ -93,6 +99,7 @@ class DesktopBridgeApp:
             ("GPS", self.gps_var),
             ("Cam Test", self.camera_test_var),
             ("GPS Test", self.gps_test_var),
+            ("Virtual Cam", self.virtual_cam_var),
             ("Log", self.log_var),
         ]
 
@@ -100,11 +107,23 @@ class DesktopBridgeApp:
             ttk.Label(status, text=f"{label}:", width=10).grid(row=idx, column=0, padx=8, pady=3, sticky=tk.W)
             ttk.Label(status, textvariable=var).grid(row=idx, column=1, padx=8, pady=3, sticky=tk.W)
 
+        preview = ttk.LabelFrame(frame, text="Camera Preview")
+        preview.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        self.preview_label = ttk.Label(preview, text="No video frame yet", anchor=tk.CENTER)
+        self.preview_label.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
         actions = ttk.LabelFrame(frame, text="Guided Actions")
         actions.pack(fill=tk.X)
         ttk.Button(actions, text="Apply Firewall Rule", command=self.apply_firewall_rule_clicked).pack(
             side=tk.LEFT, padx=8, pady=8
         )
+        self.virtual_cam_btn = ttk.Button(
+            actions,
+            text="Enable Virtual Cam",
+            command=self.toggle_virtual_camera_clicked,
+            state=tk.DISABLED,
+        )
+        self.virtual_cam_btn.pack(side=tk.LEFT, padx=8, pady=8)
         self.camera_test_btn = ttk.Button(actions, text="Test Camera", command=self.run_camera_test_clicked, state=tk.DISABLED)
         self.camera_test_btn.pack(side=tk.LEFT, padx=8, pady=8)
         self.gps_test_btn = ttk.Button(actions, text="Test GPS", command=self.run_gps_test_clicked, state=tk.DISABLED)
@@ -144,12 +163,15 @@ class DesktopBridgeApp:
         self.detect_btn.config(state=tk.DISABLED)
         self.connect_btn.config(state=tk.DISABLED)
         self.disconnect_btn.config(state=tk.NORMAL)
+        self.virtual_cam_btn.config(state=tk.DISABLED)
         self.camera_test_btn.config(state=tk.DISABLED)
         self.gps_test_btn.config(state=tk.DISABLED)
         self.camera_test_var.set("pending")
         self.gps_test_var.set("pending")
         self.latest_gps_timestamp_ms = None
         self.gps_var.set("No sample")
+        self.virtual_cam_var.set(self.video_receiver.virtual_status())
+        self._clear_preview()
         self.status_var.set("Connecting")
         self.log_var.set("Auto-detecting mobile server..." if not host else "Starting connection supervisor")
 
@@ -167,17 +189,21 @@ class DesktopBridgeApp:
     def stop_connection(self) -> None:
         if self.session_cancel_event is not None:
             self.session_cancel_event.set()
+        self.video_receiver.set_virtual_camera_enabled(False)
+        self.virtual_cam_var.set(self.video_receiver.virtual_status())
         self.status_var.set("Disconnected")
         self.log_var.set("Connection stopped")
         self.detect_btn.config(state=tk.NORMAL)
         self.connect_btn.config(state=tk.NORMAL)
         self.disconnect_btn.config(state=tk.DISABLED)
+        self.virtual_cam_btn.config(state=tk.DISABLED)
         self.camera_test_btn.config(state=tk.DISABLED)
         self.gps_test_btn.config(state=tk.DISABLED)
         self.camera_test_var.set("not run")
         self.gps_test_var.set("not run")
         self.latest_gps_timestamp_ms = None
         self.gps_var.set("No sample")
+        self._clear_preview()
 
     def apply_firewall_rule_clicked(self) -> None:
         ok, detail = apply_firewall_rule()
@@ -230,8 +256,13 @@ class DesktopBridgeApp:
             self.endpoint_var.set(f"{endpoint.host}:{endpoint.port}")
             self.server_var.set(status.server_id)
             self.camera_var.set(status.camera_state)
+            self.virtual_cam_btn.config(state=tk.NORMAL)
             self.camera_test_btn.config(state=tk.NORMAL)
             self.gps_test_btn.config(state=tk.NORMAL)
+            self.virtual_cam_var.set(self.video_receiver.virtual_status())
+            self.virtual_cam_btn.config(
+                text="Disable Virtual Cam" if self.video_receiver.virtual_status().startswith(("ready", "streaming", "enabled")) else "Enable Virtual Cam"
+            )
             self.log_var.set("Stream active")
             return
 
@@ -250,6 +281,22 @@ class DesktopBridgeApp:
             self.gps_var.set(
                 f"lat={sample.latitude:.6f}, lon={sample.longitude:.6f}, acc={sample.accuracy_m:.1f}m"
             )
+            return
+
+        if kind == "camera_frame":
+            frame_bytes = event["frame"]
+            self._render_preview(frame_bytes)
+            return
+
+        if kind == "virtual_status":
+            message = str(event.get("message", "unknown"))
+            self.virtual_cam_var.set(message)
+            if message.startswith(("ready", "streaming", "enabled")):
+                self.virtual_cam_btn.config(text="Disable Virtual Cam")
+            else:
+                self.virtual_cam_btn.config(text="Enable Virtual Cam")
+            if self.status_var.get() == "Connected":
+                self.virtual_cam_btn.config(state=tk.NORMAL)
             return
 
         if kind == "camera_test_result":
@@ -277,14 +324,57 @@ class DesktopBridgeApp:
             self.detect_btn.config(state=tk.NORMAL)
             self.connect_btn.config(state=tk.NORMAL)
             self.disconnect_btn.config(state=tk.DISABLED)
+            self.virtual_cam_btn.config(state=tk.DISABLED, text="Enable Virtual Cam")
             self.camera_test_btn.config(state=tk.DISABLED)
             self.gps_test_btn.config(state=tk.DISABLED)
+            self._clear_preview()
             return
 
         if kind == "firewall":
             self.status_var.set("Needs attention")
             self.log_var.set("Connection failed after auto-recovery")
             messagebox.showwarning(APP_NAME, get_firewall_guidance())
+
+    def toggle_virtual_camera_clicked(self) -> None:
+        if self.status_var.get() != "Connected":
+            messagebox.showwarning(APP_NAME, "Conecte primeiro para ativar camera virtual.")
+            return
+
+        enable = not self.video_receiver.virtual_status().startswith(("ready", "streaming", "enabled"))
+        self.virtual_cam_btn.config(state=tk.DISABLED)
+        thread = threading.Thread(
+            target=self._toggle_virtual_camera_worker,
+            args=(enable, self.current_session_id),
+            daemon=True,
+        )
+        thread.start()
+
+    def _toggle_virtual_camera_worker(self, enable: bool, session_id: int) -> None:
+        ok, message = self.video_receiver.set_virtual_camera_enabled(enable)
+        if not ok and "backend_installed_restart_required" in message:
+            self._post(
+                {
+                    "kind": "log",
+                    "message": "Virtual cam backend instalado. Feche e abra o app desktop para finalizar.",
+                },
+                sid=session_id,
+            )
+        self._post({"kind": "virtual_status", "message": message}, sid=session_id)
+
+    def _render_preview(self, frame_bytes: bytes) -> None:
+        try:
+            with Image.open(io.BytesIO(frame_bytes)) as img:
+                rgb = img.convert("RGB")
+                rgb.thumbnail((920, 420), Image.Resampling.LANCZOS)
+                imgtk = ImageTk.PhotoImage(rgb)
+        except Exception:
+            return
+        self.preview_image_ref = imgtk
+        self.preview_label.configure(image=imgtk, text="")
+
+    def _clear_preview(self) -> None:
+        self.preview_image_ref = None
+        self.preview_label.configure(image="", text="No video frame yet")
 
     def run_camera_test_clicked(self) -> None:
         self._start_diag_test(kind="camera")
@@ -361,6 +451,18 @@ class DesktopBridgeApp:
                         {"kind": "log", "message": "Camera test failed: camera state is not ready."},
                         sid=session_id,
                     )
+                    return
+
+                frame = await client.get_camera_frame(endpoint)
+                if not frame:
+                    self._post({"kind": "camera_test_result", "message": "fail (no frame)"}, sid=session_id)
+                    self._post(
+                        {"kind": "log", "message": "Camera test failed: no JPEG frame from /api/camera/frame."},
+                        sid=session_id,
+                    )
+                    return
+
+                self._post({"kind": "camera_frame", "frame": frame}, sid=session_id)
                 return
 
             sample = await client.wait_for_new_gps_sample(
@@ -439,7 +541,6 @@ class DesktopBridgeApp:
     async def _worker_loop(self, host: str, port: int, session_id: int, cancel_event: threading.Event) -> None:
         client = MobileServerClient()
         recovery = EndpointRecovery(client=client, log=lambda m: self._post({"kind": "log", "message": m}, sid=session_id))
-        video = VideoReceiver()
 
         try:
             endpoint, status = await self._resolve_initial_endpoint(
@@ -459,11 +560,12 @@ class DesktopBridgeApp:
             while not cancel_event.is_set():
                 self._post({"kind": "connected", "status": status, "endpoint": endpoint}, sid=session_id)
 
-                video_state = await video.start()
+                video_state = await self.video_receiver.start()
                 self._post({"kind": "log", "message": video_state.detail}, sid=session_id)
+                self._post({"kind": "virtual_status", "message": self.video_receiver.virtual_status()}, sid=session_id)
 
-                disconnected = await self._run_online_loop(client, endpoint, cancel_event, session_id)
-                await video.stop()
+                disconnected = await self._run_online_loop(client, endpoint, cancel_event, session_id, self.video_receiver)
+                await self.video_receiver.stop()
                 if not disconnected or cancel_event.is_set():
                     break
 
@@ -542,13 +644,17 @@ class DesktopBridgeApp:
         endpoint: Endpoint,
         cancel_event: threading.Event,
         session_id: int,
+        video: VideoReceiver,
     ) -> bool:
         last_health_ok_at = time.monotonic()
         next_health_check_at = 0.0
         consecutive_health_failures = 0
         gps_restart_attempt = 0
+        camera_restart_attempt = 0
         gps_started_at = 0.0
+        camera_started_at = 0.0
         gps_task: asyncio.Task | None = None
+        camera_task: asyncio.Task | None = None
 
         async def gps_reader() -> None:
             async for sample in client.gps_stream(endpoint):
@@ -556,12 +662,37 @@ class DesktopBridgeApp:
                     return
                 self._post({"kind": "gps", "sample": sample}, sid=session_id)
 
+        async def camera_reader() -> None:
+            last_ui_frame_at = 0.0
+            last_signature: tuple[int, int, int] | None = None
+            while not cancel_event.is_set():
+                frame = await client.get_camera_frame(endpoint)
+                if not frame:
+                    await asyncio.sleep(0.25)
+                    continue
+
+                video.process_frame(frame)
+                self._post({"kind": "virtual_status", "message": video.virtual_status()}, sid=session_id)
+
+                signature = (len(frame), frame[0] if frame else 0, frame[-1] if frame else 0)
+                now = time.monotonic()
+                if signature != last_signature or (now - last_ui_frame_at) >= 0.4:
+                    self._post({"kind": "camera_frame", "frame": frame}, sid=session_id)
+                    last_ui_frame_at = now
+                    last_signature = signature
+
+                await asyncio.sleep(0.08)
+
         while not cancel_event.is_set():
             now = time.monotonic()
 
             if gps_task is None:
                 gps_started_at = now
                 gps_task = asyncio.create_task(gps_reader())
+
+            if camera_task is None:
+                camera_started_at = now
+                camera_task = asyncio.create_task(camera_reader())
 
             if now >= next_health_check_at:
                 ok = await client.check_health(endpoint)
@@ -613,15 +744,45 @@ class DesktopBridgeApp:
                 gps_task = asyncio.create_task(gps_reader())
                 continue
 
+            if camera_task.done():
+                if cancel_event.is_set():
+                    break
+
+                run_duration = now - camera_started_at
+                if run_duration >= 20:
+                    camera_restart_attempt = 0
+                else:
+                    camera_restart_attempt += 1
+
+                try:
+                    camera_exception = camera_task.exception()
+                except asyncio.CancelledError:
+                    break
+
+                if camera_exception is None:
+                    self._post({"kind": "log", "message": "Camera reader closed; restarting..."}, sid=session_id)
+                else:
+                    self._post(
+                        {"kind": "log", "message": f"Camera reader error: {camera_exception}. Restarting..."},
+                        sid=session_id,
+                    )
+
+                delay_index = min(camera_restart_attempt, len(GPS_RESTART_DELAYS_SECONDS) - 1)
+                await asyncio.sleep(GPS_RESTART_DELAYS_SECONDS[delay_index])
+                camera_started_at = time.monotonic()
+                camera_task = asyncio.create_task(camera_reader())
+                continue
+
             if time.monotonic() - last_health_ok_at > HEALTH_STALE_TIMEOUT_SECONDS:
                 self._post({"kind": "log", "message": "Health timeout exceeded; forcing endpoint recovery."}, sid=session_id)
                 break
 
             await asyncio.sleep(0.2)
 
-        if gps_task is not None:
-            gps_task.cancel()
-            await asyncio.gather(gps_task, return_exceptions=True)
+        for task in (gps_task, camera_task):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(*(t for t in (gps_task, camera_task) if t is not None), return_exceptions=True)
         return not cancel_event.is_set()
 
     def run(self) -> None:

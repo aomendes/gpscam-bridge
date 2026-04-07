@@ -5,6 +5,7 @@ import com.gpscambridge.mobile.stream.CameraStreamer
 import io.ktor.http.ContentDisposition
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.call
@@ -118,6 +119,17 @@ class MobileServer(
 
             get("/api/health") {
                 call.respond(HealthPayload(ok = true, timestamp_ms = System.currentTimeMillis()))
+            }
+
+            get("/api/camera/frame") {
+                val frame = cameraStreamer.latestFrameJpeg()
+                if (frame == null) {
+                    call.respond(HttpStatusCode.ServiceUnavailable, "camera_frame_unavailable")
+                    return@get
+                }
+                call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
+                call.response.header("X-Frame-Timestamp-Ms", cameraStreamer.latestFrameTimestampMs().toString())
+                call.respondBytes(frame, ContentType.Image.JPEG)
             }
 
             post("/api/webrtc/offer") {

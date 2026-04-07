@@ -93,6 +93,15 @@ class MobileServerClient:
         except (asyncio.TimeoutError, aiohttp.ClientError):
             return None
 
+    async def get_camera_frame(self, endpoint: Endpoint) -> bytes | None:
+        try:
+            async with self._session.get(f"{endpoint.base_url}/api/camera/frame") as response:
+                if response.status != 200:
+                    return None
+                return await response.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None
+
     async def post_webrtc_offer(self, endpoint: Endpoint, offer: dict) -> dict:
         # Signaling endpoint required by contract. App currently uses status only.
         async with self._session.post(f"{endpoint.base_url}/api/webrtc/offer", json=offer) as response:

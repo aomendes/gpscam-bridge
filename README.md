@@ -87,3 +87,21 @@ O workflow `.github/workflows/desktop-release.yml` publica `GpsCamBridgeDesktop.
   - `RELEASES_URL`
 - O arquivo `GpsCamBridgeDesktop.exe` ja foi copiado em `mobile-android/app/src/main/assets/windows/`.
 - Neste ambiente nao ha SDK .NET instalado e nao ha Gradle global; o app Windows foi entregue em Python+exe e o app Android foi estruturado para abrir no Android Studio/Gradle Wrapper.
+
+## Teste rapido no celular (Android + Windows)
+
+1. No Android Studio, abra a pasta `mobile-android/`.
+2. Conecte o celular por USB (modo desenvolvedor + depuracao USB) e rode o app no device.
+3. No app Android:
+   - aceite permissoes de Camera e Localizacao;
+   - toque em `Iniciar servidor`;
+   - confirme a URL exibida (ex.: `http://192.168.0.20:8765`) e o QR.
+4. No PC (mesma rede Wi-Fi do celular), abra essa URL no navegador.
+5. Baixe o `GpsCamBridgeDesktop.exe`:
+   - primeiro tenta download local do celular;
+   - se nao houver binario local, redireciona automaticamente para GitHub Release.
+6. Execute o app desktop, informe IP/porta do celular e clique `Connect`.
+7. Validacao esperada:
+   - status `Connected`;
+   - GPS atualizando no desktop;
+   - se a rede cair, reconexao automatica em ate 60s.

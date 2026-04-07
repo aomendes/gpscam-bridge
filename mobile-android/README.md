@@ -20,6 +20,8 @@ Quando publicar no GitHub, use o workflow em `.github/workflows/desktop-release.
 
 ## Assets Windows
 `app/src/main/assets/windows/GpsCamBridgeDesktop.exe` e servido por `/download/windows`.
+Se o asset local nao existir, o endpoint redireciona automaticamente para:
+`https://github.com/aomendes/gpscam-bridge/releases/latest/download/GpsCamBridgeDesktop.exe`.
 
 ## Build
 Abra a pasta `mobile-android` no Android Studio e sincronize o Gradle.

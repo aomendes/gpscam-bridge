@@ -5,7 +5,6 @@ import com.gpscambridge.mobile.stream.CameraStreamer
 import io.ktor.http.ContentDisposition
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
-import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.call
@@ -16,6 +15,7 @@ import io.ktor.server.request.receive
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
+import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -90,10 +90,7 @@ class MobileServer(
                 }.getOrNull()
 
                 if (bytes == null) {
-                    call.respondText(
-                        "Windows installer not bundled. Use GitHub Releases: ${ServerConfig.RELEASES_URL}",
-                        status = HttpStatusCode.NotFound,
-                    )
+                    call.respondRedirect(ServerConfig.RELEASE_ASSET_URL, permanent = false)
                     return@get
                 }
 
@@ -176,7 +173,7 @@ class MobileServer(
                 <p>Server active at <code>$base</code></p>
                 <p>Use this page on Windows to install the desktop companion.</p>
                 <a class="btn" href="/download/windows">Download Windows .exe (local)</a>
-                <a class="btn secondary" href="${ServerConfig.RELEASES_URL}">Download from GitHub Releases</a>
+                <a class="btn secondary" href="${ServerConfig.RELEASE_ASSET_URL}">Download from GitHub Release (.exe)</a>
                 <p><a href="${ServerConfig.REPOSITORY_URL}">Repository</a></p>
                 <p>After install, open the desktop app and connect to <code>${state.ip}:${state.port}</code>.</p>
               </div>

@@ -48,7 +48,7 @@ def _command_tokens(exe_path: str) -> list[list[str]]:
             "action=allow",
             "protocol=TCP",
             "localport=8765-8775",
-            "profile=private",
+            "profile=any",
         ],
         [
             "netsh",
@@ -61,7 +61,7 @@ def _command_tokens(exe_path: str) -> list[list[str]]:
             "action=allow",
             "protocol=TCP",
             "remoteport=8765-8775",
-            "profile=private",
+            "profile=any",
         ],
         [
             "netsh",
@@ -74,7 +74,7 @@ def _command_tokens(exe_path: str) -> list[list[str]]:
             "action=allow",
             f"program={exe_path}",
             "enable=yes",
-            "profile=private",
+            "profile=any",
         ],
         [
             "netsh",
@@ -87,17 +87,17 @@ def _command_tokens(exe_path: str) -> list[list[str]]:
             "action=allow",
             f"program={exe_path}",
             "enable=yes",
-            "profile=private",
+            "profile=any",
         ],
     ]
 
 
 def _powershell_lines(exe_path: str) -> list[str]:
     return [
-        "netsh advfirewall firewall add rule name=\"GpsCam Bridge TCP In\" dir=in action=allow protocol=TCP localport=8765-8775 profile=private",
-        "netsh advfirewall firewall add rule name=\"GpsCam Bridge TCP Out\" dir=out action=allow protocol=TCP remoteport=8765-8775 profile=private",
-        f"netsh advfirewall firewall add rule name=\"GpsCam Bridge Program In\" dir=in action=allow program=\"{exe_path}\" enable=yes profile=private",
-        f"netsh advfirewall firewall add rule name=\"GpsCam Bridge Program Out\" dir=out action=allow program=\"{exe_path}\" enable=yes profile=private",
+        "netsh advfirewall firewall add rule name=\"GpsCam Bridge TCP In\" dir=in action=allow protocol=TCP localport=8765-8775 profile=any",
+        "netsh advfirewall firewall add rule name=\"GpsCam Bridge TCP Out\" dir=out action=allow protocol=TCP remoteport=8765-8775 profile=any",
+        f"netsh advfirewall firewall add rule name=\"GpsCam Bridge Program In\" dir=in action=allow program=\"{exe_path}\" enable=yes profile=any",
+        f"netsh advfirewall firewall add rule name=\"GpsCam Bridge Program Out\" dir=out action=allow program=\"{exe_path}\" enable=yes profile=any",
     ]
 
 

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Desktop build
+/desktop-windows/build/
+/desktop-windows/dist/
+/desktop-windows/*.spec
+
+# Android
+/mobile-android/.gradle/
+/mobile-android/**/build/
+/mobile-android/local.properties
+/mobile-android/app/src/main/assets/windows/GpsCamBridgeDesktop.exe
+
+# Desktop local cache
+/desktop-windows/src/gpscam_bridge/__pycache__/
+
+# IDE
+/.idea/
+.vscode/
